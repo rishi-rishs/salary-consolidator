@@ -1,0 +1,22 @@
+name: Build Windows Executable
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Executable
+        uses: sayyid5416/pyinstaller@v1
+        with:
+          python_ver: '3.11'
+          spec: 'consolidate_salaries.py'
+          requirements: 'requirements.txt'
+          upload_exe_with_name: 'SalaryConsolidator-Windows'
+          options: '--onefile, --console, --name "SalaryConsolidator"'
