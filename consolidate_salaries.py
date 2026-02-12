@@ -7,7 +7,6 @@ from datetime import datetime
 def parse_date_from_sheet_name(sheet_name):
     """
     Attempts to parse a sheet name into a 'MMM-YY' string.
-    Tries various formats. Returns the formatted string or the original name if parsing fails.
     """
     formats = [
         "%b %Y", "%B %Y", "%b-%Y", "%B-%Y", "%b_%Y", "%B_%Y",
@@ -25,35 +24,24 @@ def parse_date_from_sheet_name(sheet_name):
 
     return clean_name
 
-def get_standardized_name(name, current_salary, prev_month_data, all_standard_names, aliases):
+def get_employee_id(name, current_salary, prev_month_data, employee_registry, aliases):
     """
-    Determines the standardized name by comparing to previous month's employees.
+    Returns an employee ID (integer) for the given name.
+    Uses fuzzy matching against previous month's data.
 
-    Args:
-        name: The name from the current sheet.
-        current_salary: The salary of this employee in current month.
-        prev_month_data: Dict of {name: salary} from the previous month.
-        all_standard_names: Set of all standardized names seen so far.
-        aliases: Dictionary mapping alternative names to standardized names.
-
-    Returns:
-        The standardized name to use, or None if it's a new entry.
+    employee_registry: dict mapping employee_id -> list of (name, month_index) tuples
     """
     name = str(name).strip()
 
-    # 1. Check if it's already a known exact match
-    if name in all_standard_names:
-        return name
-
-    # 2. Check if it's a known alias
+    # Check if this exact name is a known alias
     if name in aliases:
         return aliases[name]
 
-    # 3. If no previous month data, it's the first month - all are new
+    # If no previous month data, this is a new employee
     if not prev_month_data:
         return None
 
-    # 4. Fuzzy match against previous month's employees only
+    # Fuzzy match against previous month's names
     prev_month_names = list(prev_month_data.keys())
     matches = process.extract(name, prev_month_names, scorer=fuzz.WRatio, limit=2)
 
@@ -77,11 +65,11 @@ def get_standardized_name(name, current_salary, prev_month_data, all_standard_na
     print(f"Current Salary:   {current_salary}")
     print(f"{'='*60}")
     print(f"Best match:       '{best_match}' (Score: {best_score:.1f})")
-    print(f"  Previous Salary: {prev_month_data[best_match]}")
+    print(f"  Previous Salary: {prev_month_data[best_match]['salary']}")
 
     if second_match and second_score >= 60:
         print(f"Second best:      '{second_match}' (Score: {second_score:.1f})")
-        print(f"  Previous Salary: {prev_month_data[second_match]}")
+        print(f"  Previous Salary: {prev_month_data[second_match]['salary']}")
 
     print(f"{'='*60}")
 
@@ -92,25 +80,24 @@ def get_standardized_name(name, current_salary, prev_month_data, all_standard_na
             choice = input(f"Match with: [y]es {best_match} / [n]ew / [t]ype manual: ").lower().strip()
 
         if choice == 'y' or choice == 'yes' or choice == '1':
-            aliases[name] = best_match
-            return best_match
+            emp_id = prev_month_data[best_match]['emp_id']
+            aliases[name] = emp_id
+            return emp_id
         elif choice == '2' and second_match and second_score >= 60:
-            aliases[name] = second_match
-            return second_match
+            emp_id = prev_month_data[second_match]['emp_id']
+            aliases[name] = emp_id
+            return emp_id
         elif choice == 'n' or choice == 'new':
             return None
         elif choice == 't' or choice == 'type':
             manual_name = input("Enter the correct existing target name: ").strip()
-            if manual_name in all_standard_names:
-                aliases[name] = manual_name
-                return manual_name
+            if manual_name in prev_month_data:
+                emp_id = prev_month_data[manual_name]['emp_id']
+                aliases[name] = emp_id
+                return emp_id
             else:
-                print(f"'{manual_name}' not found in existing list. Creating as new entry? (y/n)")
-                confirm = input("> ").lower().strip()
-                if confirm == 'y':
-                    return manual_name
-                else:
-                    continue
+                print(f"'{manual_name}' not found in previous month. Treating as new employee.")
+                return None
         else:
             print("Invalid choice. Please try again.")
 
@@ -133,25 +120,27 @@ def main():
         print(f"Error reading Excel file: {e}")
         sys.exit(1)
 
-    # Master data structure: { "Standard Name": { "Month1": Salary, "Month2": Salary } }
-    master_data = {}
+    # Employee registry: emp_id -> {names: [(name, month_idx), ...], salaries: {month: salary}}
+    employee_registry = {}
+    next_emp_id = 1
 
-    # All standardized names seen so far
-    all_standard_names = set()
-
-    # Aliases to remember user decisions: { "Ms. Deepa": "Deepa Thukkaraman" }
+    # Aliases: name -> emp_id
     aliases = {}
 
-    # Previous month's data for comparison: { "Name": salary }
+    # Previous month's data: name -> {emp_id, salary}
     prev_month_data = {}
 
+    # Track month order
+    months_in_order = []
+
     # Iterate through sheets
-    for sheet_name in xls.sheet_names:
+    for month_idx, sheet_name in enumerate(xls.sheet_names):
         print(f"\n{'#'*60}")
         print(f"### Processing Sheet: {sheet_name} ###")
         print(f"{'#'*60}")
 
         column_header = parse_date_from_sheet_name(sheet_name)
+        months_in_order.append(column_header)
 
         try:
             df = pd.read_excel(xls, sheet_name=sheet_name)
@@ -160,89 +149,103 @@ def main():
             continue
 
         if df.shape[1] < 3:
-            print(f"Skipping sheet '{sheet_name}': Expected at least 3 columns (A, B, C), found {df.shape[1]}")
+            print(f"Skipping sheet '{sheet_name}': Expected at least 3 columns, found {df.shape[1]}")
             continue
 
         # Skip header row (first row)
         df = df.iloc[1:]
 
-        # Skip last row if it contains "total" (case-insensitive)
+        # Skip last row if it contains "total"
         if len(df) > 0:
             last_name = str(df.iloc[-1, 1]).strip().lower() if not pd.isna(df.iloc[-1, 1]) else ""
             if "total" in last_name:
                 df = df.iloc[:-1]
 
-        # Current month's data (to become prev_month_data for next iteration)
+        # Current month's data
         current_month_data = {}
 
         for index, row in df.iterrows():
             raw_name = row.iloc[1]  # Column B for employee name
-            salary = row.iloc[2]    # Column C for salary
+            salary = row.iloc[2]    # Column C for salary (Gross)
 
             if pd.isna(raw_name):
                 continue
 
             raw_name = str(raw_name).strip()
 
-            # Determine the standard name by comparing to previous month
-            target_name = get_standardized_name(
+            # Try to match to existing employee
+            emp_id = get_employee_id(
                 raw_name,
                 salary,
                 prev_month_data,
-                all_standard_names,
+                employee_registry,
                 aliases
             )
 
-            if target_name is None:
+            if emp_id is None:
                 # New employee
-                target_name = raw_name
-                all_standard_names.add(target_name)
-                print(f"Added new employee: '{target_name}'")
-            elif target_name not in all_standard_names:
-                # Manually typed new name
-                all_standard_names.add(target_name)
-                print(f"Added new employee (manually typed): '{target_name}'")
+                emp_id = next_emp_id
+                next_emp_id += 1
+                employee_registry[emp_id] = {
+                    'names': [],
+                    'salaries': {}
+                }
+                print(f"Added new employee #{emp_id}: '{raw_name}'")
 
-            # Update Master Data
-            if target_name not in master_data:
-                master_data[target_name] = {}
+            # Record this name variant with month index (for tracking latest name)
+            employee_registry[emp_id]['names'].append((raw_name, month_idx))
 
-            # Warn if overwriting
-            if column_header in master_data[target_name]:
-                print(f"Warning: Duplicate entry for '{target_name}' in '{column_header}'. Overwriting.")
+            # Record salary for this month
+            if column_header in employee_registry[emp_id]['salaries']:
+                print(f"Warning: Duplicate entry for employee #{emp_id} in '{column_header}'. Overwriting.")
+            employee_registry[emp_id]['salaries'][column_header] = salary
 
-            master_data[target_name][column_header] = salary
-
-            # Track this employee for next month's comparison
-            current_month_data[target_name] = salary
+            # Track for next month's comparison
+            current_month_data[raw_name] = {'emp_id': emp_id, 'salary': salary}
+            aliases[raw_name] = emp_id
 
         # Update prev_month_data for next iteration
         prev_month_data = current_month_data.copy()
 
-    # Create final DataFrame
+    # Build final output using LATEST name for each employee
     print(f"\n{'#'*60}")
     print("### Finalizing Data ###")
     print(f"{'#'*60}")
 
-    final_df = pd.DataFrame.from_dict(master_data, orient='index')
+    # Create output data
+    output_data = []
 
-    # Sort columns chronologically
+    for emp_id, emp_data in employee_registry.items():
+        # Get the latest name (highest month_idx)
+        latest_name = max(emp_data['names'], key=lambda x: x[1])[0]
+
+        row = {'Employee Name': latest_name}
+        row.update(emp_data['salaries'])
+        output_data.append(row)
+
+    final_df = pd.DataFrame(output_data)
+
+    # Sort columns chronologically (keep Employee Name first)
+    date_cols = [c for c in final_df.columns if c != 'Employee Name']
     try:
-        final_df = final_df.reindex(sorted(final_df.columns, key=lambda x: datetime.strptime(x, "%b-%y")), axis=1)
+        date_cols_sorted = sorted(date_cols, key=lambda x: datetime.strptime(x, "%b-%y"))
     except ValueError:
-        print("Could not sort columns chronologically (mixed formats). Sorting alphabetically.")
-        final_df = final_df.sort_index(axis=1)
+        print("Could not sort columns chronologically. Using original order.")
+        date_cols_sorted = date_cols
 
-    final_df.index.name = "Employee Name"
+    final_df = final_df[['Employee Name'] + date_cols_sorted]
+
+    # Sort rows by employee name
+    final_df = final_df.sort_values('Employee Name').reset_index(drop=True)
 
     output_filename = "consolidated_salaries.xlsx"
-    final_df.to_excel(output_filename)
+    final_df.to_excel(output_filename, index=False)
 
     print(f"\nSuccess! Consolidated data saved to '{output_filename}'")
     print(f"Total employees: {len(final_df)}")
-    print(f"Total months: {len(final_df.columns)}")
+    print(f"Total months: {len(date_cols_sorted)}")
     print(f"\nPreview:")
-    print(final_df.head(10))
+    print(final_df.head(10).to_string())
 
 if __name__ == "__main__":
     main()
