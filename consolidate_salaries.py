@@ -24,13 +24,60 @@ def parse_date_from_sheet_name(sheet_name):
 
     return clean_name
 
+def save_current_progress(employee_registry, output_filename="consolidated_salaries.xlsx"):
+    """Save current progress to Excel file."""
+    if not employee_registry:
+        print("No data to save yet.")
+        return False
+
+    output_data = []
+    for emp_id, emp_data in employee_registry.items():
+        if not emp_data['names']:
+            continue
+        latest_name = max(emp_data['names'], key=lambda x: x[1])[0]
+        row = {'Employee Name': latest_name}
+        row.update(emp_data['salaries'])
+        output_data.append(row)
+
+    if not output_data:
+        print("No data to save yet.")
+        return False
+
+    final_df = pd.DataFrame(output_data)
+
+    # Sort columns chronologically
+    date_cols = [c for c in final_df.columns if c != 'Employee Name']
+    try:
+        date_cols_sorted = sorted(date_cols, key=lambda x: datetime.strptime(x, "%b-%y"))
+    except ValueError:
+        date_cols_sorted = date_cols
+
+    final_df = final_df[['Employee Name'] + date_cols_sorted]
+    final_df = final_df.sort_values('Employee Name').reset_index(drop=True)
+    final_df.to_excel(output_filename, index=False)
+
+    print(f"\n>>> SAVED! {len(final_df)} employees saved to '{output_filename}' <<<\n")
+    return True
+
+
+# Global reference to employee_registry for saving
+_global_registry = None
+
+
 def get_employee_id(name, current_salary, prev_month_data, employee_registry, aliases):
     """
     Returns an employee ID (integer) for the given name.
     Uses fuzzy matching against previous month's data.
 
-    employee_registry: dict mapping employee_id -> list of (name, month_index) tuples
+    Special return values:
+    - Integer: matched employee ID
+    - None: new employee
+    - 'SAVE': user requested to save and continue
+    - 'QUIT': user requested to save and quit
     """
+    global _global_registry
+    _global_registry = employee_registry
+
     name = str(name).strip()
 
     # Check if this exact name is a known alias
@@ -72,14 +119,22 @@ def get_employee_id(name, current_salary, prev_month_data, employee_registry, al
         print(f"  Previous Salary: {prev_month_data[second_match]['salary']}")
 
     print(f"{'='*60}")
+    print(f"[s] Save progress now  |  [q] Save and quit")
 
     while True:
         if second_match and second_score >= 60:
-            choice = input(f"Match with: [1] {best_match} / [2] {second_match} / [n]ew / [t]ype manual: ").lower().strip()
+            choice = input(f"Match: [1] {best_match} / [2] {second_match} / [n]ew / [t]ype / [s]ave / [q]uit: ").lower().strip()
         else:
-            choice = input(f"Match with: [y]es {best_match} / [n]ew / [t]ype manual: ").lower().strip()
+            choice = input(f"Match: [y]es {best_match} / [n]ew / [t]ype / [s]ave / [q]uit: ").lower().strip()
 
-        if choice == 'y' or choice == 'yes' or choice == '1':
+        if choice == 's' or choice == 'save':
+            save_current_progress(employee_registry)
+            # Continue asking for this employee
+            continue
+        elif choice == 'q' or choice == 'quit':
+            save_current_progress(employee_registry)
+            return 'QUIT'
+        elif choice == 'y' or choice == 'yes' or choice == '1':
             emp_id = prev_month_data[best_match]['emp_id']
             aliases[name] = emp_id
             return emp_id
@@ -181,6 +236,11 @@ def main():
                 employee_registry,
                 aliases
             )
+
+            # Check if user requested to quit
+            if emp_id == 'QUIT':
+                print("\nQuitting... Final save already completed.")
+                return
 
             if emp_id is None:
                 # New employee
